@@ -60,6 +60,9 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var feedbackLayoutParams: WindowManager.LayoutParams? = null
     private var audioRecord: AudioRecord? = null
     private var pcmStream: ByteArrayOutputStream? = null
+    private var gatewayStream: GatewayStream? = null
+    private var streamController: GatewayStreamController? = null
+    private var pcmChunker: PcmChunker? = null
     private val handler = Handler(Looper.getMainLooper())
     private val hideFeedback = Runnable {
         feedbackView?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction {
@@ -85,6 +88,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        cleanupGatewayStream()
         instance = null
         removeOverlay()
         super.onDestroy()
@@ -333,11 +337,22 @@ class WhisperAccessibilityService : AccessibilityService() {
         setAppearance(COLOR_RECORDING)
         startPulse()
 
+        if (prefs().getBoolean("use_gateway", false)) {
+            startGatewayStreaming()
+        }
+
         thread {
             val buf = ByteArray(bufSize)
             while (state == State.RECORDING) {
                 val n = audioRecord?.read(buf, 0, buf.size) ?: break
-                if (n > 0) pcmStream?.write(buf, 0, n)
+                if (n > 0) {
+                    pcmStream?.write(buf, 0, n)
+                    if (streamController?.isActive == true) {
+                        pcmChunker?.push(buf.copyOf(n))?.let { chunk ->
+                            gatewayStream?.send(chunk)
+                        }
+                    }
+                }
             }
         }
     }
@@ -362,7 +377,16 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (pcm.isEmpty()) { reset("No audio captured"); return }
 
         if (prefs().getBoolean("use_gateway", false)) {
-            transcribeGateway(pcm)
+            val stream = gatewayStream
+            val controller = streamController
+            if (stream != null && controller?.isActive == true) {
+                controller.prepareFallback(pcm)
+                pcmChunker?.flush()?.let { stream.send(it) }
+                stream.finalize()
+            } else {
+                cleanupGatewayStream()
+                transcribeGateway(pcm)
+            }
             return
         }
 
@@ -462,7 +486,54 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun startGatewayStreaming() {
+        val baseUrl = (prefs().getString("gateway_url", "") ?: "").trim()
+        val token = prefs().getString("gateway_token", "") ?: ""
+        if (baseUrl.isBlank() || token.isBlank()) {
+            return
+        }
+
+        val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").trimEnd('/')
+        val stream = GatewayStream(wsUrl, token)
+        val chunker = PcmChunker(8000)
+        val controller = GatewayStreamController(
+            onResult = { text ->
+                if (text.isNotBlank()) {
+                    finishWith(text)
+                } else {
+                    cleanupGatewayStream()
+                    handler.post {
+                        toast("Gateway returned empty transcript")
+                        state = State.IDLE
+                        setBusy(false)
+                        setAppearance(COLOR_IDLE)
+                    }
+                }
+            },
+            onFallback = { pcm ->
+                cleanupGatewayStream()
+                transcribeGateway(pcm)
+            },
+            onConnected = {
+                showFeedback("Streaming to gateway…", 2000)
+            }
+        )
+
+        gatewayStream = stream
+        pcmChunker = chunker
+        streamController = controller
+        stream.connect(controller)
+    }
+
+    private fun cleanupGatewayStream() {
+        gatewayStream?.close()
+        gatewayStream = null
+        streamController = null
+        pcmChunker = null
+    }
+
     private fun finishWith(text: String) {
+        cleanupGatewayStream()
         handler.post {
             injectText(text)
             state = State.IDLE
@@ -522,6 +593,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun reset(msg: String) {
+        cleanupGatewayStream()
         toast(msg)
         state = State.IDLE
         setBusy(false)

@@ -12,6 +12,7 @@ import org.json.JSONObject
 class GatewayStreamController(
     private val onResult: (String) -> Unit,
     private val onFallback: (ByteArray) -> Unit,
+    private val onConnected: (() -> Unit)? = null,
 ) : GatewayStream.Listener {
 
     var isActive: Boolean = false
@@ -21,6 +22,7 @@ class GatewayStreamController(
 
     override fun onConnected() {
         isActive = true
+        onConnected?.invoke()
     }
 
     override fun onResult(json: JSONObject) {
