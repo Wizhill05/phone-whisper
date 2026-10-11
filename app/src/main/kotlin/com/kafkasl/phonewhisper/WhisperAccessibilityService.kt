@@ -348,6 +348,8 @@ class WhisperAccessibilityService : AccessibilityService() {
         setAppearance(COLOR_BUSY)
         setBusy(true)
 
+        showFeedback(activeModeLabel(), 2000)
+
         audioRecord?.stop()
         audioRecord?.release()
         audioRecord = null
@@ -420,15 +422,25 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun activeModeLabel(): String = when {
+        prefs().getBoolean("use_gateway", false) -> "VPS gateway"
+        prefs().getBoolean("use_local", true) && localTranscriber != null -> "Local model"
+        prefs().getBoolean("use_local", true) -> "Local (no model — falls back to cloud)"
+        else -> "Cloud (OpenAI)"
+    }
+
     private fun transcribeGateway(pcm: ByteArray) {
         val wav = WavWriter.encode(pcm)
         val baseUrl = (prefs().getString("gateway_url", "") ?: "").trim()
         val token = prefs().getString("gateway_token", "") ?: ""
         if (baseUrl.isBlank() || token.isBlank()) {
-            reset("Set gateway URL and token in the Phone Whisper app")
+            val msg = "Set gateway URL and token in the Phone Whisper app"
+            showFeedback(msg, 5000)
+            reset(msg)
             return
         }
 
+        Log.i(TAG, "VPS gateway: POST $baseUrl/v1/dictation (wav ${wav.size} bytes)")
         DictationClient.dictate(wav, baseUrl, token) { result ->
             val text = result.text
             if (!text.isNullOrBlank()) {
