@@ -47,6 +47,35 @@ class ModelDownloaderTest {
         assertTrue(MODEL_CATALOG.all { it.sizeMb > 0 })
     }
 
+    @Test fun `findTokensFile finds standard and model-prefixed tokens`() {
+        withTempDir { tmp ->
+            val dir1 = File(tmp, "parakeet").apply { mkdirs() }
+            File(dir1, "tokens.txt").writeText("tokens")
+            assertEquals("tokens.txt", ModelDownloader.findTokensFile(dir1)?.name)
+
+            val dir2 = File(tmp, "whisper").apply { mkdirs() }
+            File(dir2, "base.en-tokens.txt").writeText("whisper tokens")
+            assertEquals("base.en-tokens.txt", ModelDownloader.findTokensFile(dir2)?.name)
+
+            val dir3 = File(tmp, "empty").apply { mkdirs() }
+            assertNull(ModelDownloader.findTokensFile(dir3))
+        }
+    }
+
+    @Test fun `isInstalledDir requires existing directory and tokens file`() {
+        withTempDir { tmp ->
+            val missing = File(tmp, "nonexistent")
+            assertFalse(ModelDownloader.isInstalledDir(missing))
+
+            val incomplete = File(tmp, "incomplete").apply { mkdirs() }
+            File(incomplete, "model.onnx").writeText("data")
+            assertFalse(ModelDownloader.isInstalledDir(incomplete))
+
+            File(incomplete, "tokens.txt").writeText("tokens")
+            assertTrue(ModelDownloader.isInstalledDir(incomplete))
+        }
+    }
+
     // -- helpers --
 
     private fun withTempDir(block: (File) -> Unit) {

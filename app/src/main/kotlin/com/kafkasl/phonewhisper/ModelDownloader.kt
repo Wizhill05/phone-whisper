@@ -1,11 +1,13 @@
 package com.kafkasl.phonewhisper
 
 import android.content.Context
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.*
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 data class Model(
@@ -35,32 +37,61 @@ sealed class DownloadState {
 }
 
 object ModelDownloader {
+    private const val TAG = "ModelDownloader"
     private const val BASE_URL =
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
     private val client = OkHttpClient.Builder()
         .readTimeout(60, TimeUnit.SECONDS).build()
 
+    private val activeDownloads = ConcurrentHashMap.newKeySet<String>()
+
+    fun isDownloading(model: Model): Boolean = activeDownloads.contains(model.archive)
+
+    fun findTokensFile(dir: File): File? {
+        if (!dir.exists() || !dir.isDirectory) return null
+        val direct = File(dir, "tokens.txt")
+        if (direct.exists()) return direct
+        return dir.listFiles()?.firstOrNull {
+            it.isFile && it.name.endsWith(".txt") && it.name.contains("tokens")
+        }
+    }
+
+    fun isInstalledDir(dir: File): Boolean {
+        return dir.exists() && dir.isDirectory && findTokensFile(dir) != null
+    }
+
     fun modelDir(ctx: Context, model: Model) =
         File(ctx.filesDir, "models/${model.archive}")
 
     fun isInstalled(ctx: Context, model: Model) =
-        modelDir(ctx, model).exists()
+        isInstalledDir(modelDir(ctx, model))
 
     /** Download and extract model. Callbacks fire on background thread. */
     fun download(ctx: Context, model: Model, onState: (DownloadState) -> Unit) {
+        if (!activeDownloads.add(model.archive)) {
+            Log.w(TAG, "Download already in progress for ${model.archive}")
+            return
+        }
+
         val url = "$BASE_URL/${model.archive}.tar.bz2"
         val tmpFile = File(ctx.cacheDir, "${model.archive}.tar.bz2")
         val outDir = File(ctx.filesDir, "models")
 
+        Log.i(TAG, "Starting download: ${model.archive} from $url")
+
         Thread {
             try {
                 downloadFile(url, tmpFile, onState)
+                Log.i(TAG, "Downloaded ${model.archive}, starting extraction")
                 onState(DownloadState.Extracting)
                 extractTarBz2(tmpFile, outDir)
+                Log.i(TAG, "Extraction complete for ${model.archive}")
                 onState(DownloadState.Done)
             } catch (e: Exception) {
+                Log.e(TAG, "Download failed for ${model.archive}: ${e.message}", e)
                 onState(DownloadState.Error(e.message ?: "Unknown error"))
             } finally {
+                activeDownloads.remove(model.archive)
                 tmpFile.delete()
             }
         }.start()

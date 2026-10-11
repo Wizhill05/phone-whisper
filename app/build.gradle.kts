@@ -11,8 +11,8 @@ android {
         applicationId = "com.kafkasl.phonewhisper"
         minSdk = 30
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.3.5-local-cleanup"
+        versionCode = 8
+        versionName = "0.3.6-download-fix"
 
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -25,7 +25,12 @@ android {
     @Suppress("DEPRECATION")
     kotlinOptions { jvmTarget = "17" }
 
-    testOptions { unitTests { isIncludeAndroidResources = true } }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {

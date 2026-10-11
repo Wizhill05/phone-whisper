@@ -235,6 +235,7 @@ class MainActivity : AppCompatActivity() {
             text = "↓"
             textSize = 18f
             setTextColor(attrColor(com.google.android.material.R.attr.colorPrimary))
+            setOnClickListener { onModelAction(model) }
         }
         
         val progress = LinearProgressIndicator(this).apply {
@@ -278,15 +279,20 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        if (ModelDownloader.isDownloading(model)) {
+            return
+        }
+
         views.dlBtn.isEnabled = false
         views.progress.visibility = View.VISIBLE
-        views.progress.isIndeterminate = false
+        views.progress.isIndeterminate = true
         views.subtitle.text = "Starting download..."
 
         ModelDownloader.download(this, model) { state ->
             runOnUiThread {
                 when (state) {
                     is DownloadState.Downloading -> {
+                        views.progress.isIndeterminate = false
                         views.progress.progress = (state.progress * 100).toInt()
                         views.subtitle.text = "Downloading: ${(state.progress * 100).toInt()}%"
                     }
@@ -296,6 +302,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     is DownloadState.Done -> {
                         views.progress.visibility = View.GONE
+                        refreshAllCards()
                         selectModel(model.archive)
                         toast("${model.name} ready!")
                     }
