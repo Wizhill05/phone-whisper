@@ -357,6 +357,11 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         if (pcm.isEmpty()) { reset("No audio captured"); return }
 
+        if (prefs().getBoolean("use_gateway", false)) {
+            transcribeGateway(pcm)
+            return
+        }
+
         val useLocal = prefs().getBoolean("use_local", true)
         val local = localTranscriber
 
@@ -412,6 +417,39 @@ class WhisperAccessibilityService : AccessibilityService() {
                     setAppearance(COLOR_IDLE)
                 }
             }
+        }
+    }
+
+    private fun transcribeGateway(pcm: ByteArray) {
+        val wav = WavWriter.encode(pcm)
+        val baseUrl = (prefs().getString("gateway_url", "") ?: "").trim()
+        val token = prefs().getString("gateway_token", "") ?: ""
+        if (baseUrl.isBlank() || token.isBlank()) {
+            reset("Set gateway URL and token in the Phone Whisper app")
+            return
+        }
+
+        DictationClient.dictate(wav, baseUrl, token) { result ->
+            val text = result.text
+            if (!text.isNullOrBlank()) {
+                finishWith(text)
+            } else {
+                handler.post {
+                    toast("Error: ${result.error ?: "gateway error"}")
+                    state = State.IDLE
+                    setBusy(false)
+                    setAppearance(COLOR_IDLE)
+                }
+            }
+        }
+    }
+
+    private fun finishWith(text: String) {
+        handler.post {
+            injectText(text)
+            state = State.IDLE
+            setBusy(false)
+            setAppearance(COLOR_IDLE)
         }
     }
 
