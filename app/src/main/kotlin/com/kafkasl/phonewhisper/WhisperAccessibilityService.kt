@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -20,6 +21,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -64,6 +66,13 @@ class WhisperAccessibilityService : AccessibilityService() {
     @Volatile private var streamController: GatewayStreamController? = null
     @Volatile private var pcmChunker: PcmChunker? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var visibilityController: BubbleVisibilityController? = null
+    private val hideBubbleRunnable = Runnable {
+        visibilityController?.onHideTimerFired()
+    }
+    private val checkKeyboardRunnable = Runnable {
+        updateKeyboardState()
+    }
     private val hideFeedback = Runnable {
         feedbackView?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction {
             feedbackView?.visibility = View.GONE
@@ -84,14 +93,78 @@ class WhisperAccessibilityService : AccessibilityService() {
         thread { initLocalModel() }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null) return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
+                handler.removeCallbacks(checkKeyboardRunnable)
+                handler.postDelayed(checkKeyboardRunnable, 100)
+            }
+        }
+    }
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        handler.removeCallbacks(hideBubbleRunnable)
+        handler.removeCallbacks(checkKeyboardRunnable)
         cleanupGatewayStream()
         instance = null
         removeOverlay()
         super.onDestroy()
+    }
+
+    private fun isOnlyShowWithKeyboard(): Boolean =
+        prefs().getBoolean("only_show_with_keyboard", true)
+
+    fun updateVisibilityPreference() {
+        handler.post {
+            visibilityController?.onPreferenceChanged(isOnlyShowWithKeyboard())
+            updateKeyboardState()
+        }
+    }
+
+    private fun updateKeyboardState() {
+        val active = isKeyboardActive()
+        visibilityController?.onKeyboardVisibilityChanged(active)
+    }
+
+    private fun isKeyboardActive(): Boolean {
+        val windowList = try { windows } catch (e: Exception) { null }
+        if (!windowList.isNullOrEmpty()) {
+            val rect = Rect()
+            for (win in windowList) {
+                if (win.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    win.getBoundsInScreen(rect)
+                    if (rect.height() > 0 && rect.width() > 0) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        // Fallback: check if currently focused node is editable
+        val root = rootInActiveWindow ?: return false
+        try {
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focused != null) {
+                val isEdit = focused.isEditable
+                focused.recycle()
+                return isEdit
+            }
+        } finally {
+            root.recycle()
+        }
+        return false
+    }
+
+    private fun markIdle() {
+        state = State.IDLE
+        setBusy(false)
+        setAppearance(COLOR_IDLE)
+        visibilityController?.onDictationFinished()
     }
 
     private fun initLocalModel() {
@@ -213,6 +286,14 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
         positionFeedback(feedbackParams, params)
 
+        val keyboardActive = isKeyboardActive()
+        val onlyShowWithKeyboard = isOnlyShowWithKeyboard()
+
+        if (onlyShowWithKeyboard && !keyboardActive) {
+            overlay.alpha = 0f
+            overlay.visibility = View.GONE
+        }
+
         wm.addView(overlay, params)
         wm.addView(feedback, feedbackParams)
         overlayView = overlay
@@ -221,9 +302,48 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedbackView = feedback
         layoutParams = params
         feedbackLayoutParams = feedbackParams
+
+        val controller = BubbleVisibilityController(
+            onShow = {
+                overlayView?.let { v ->
+                    v.animate().cancel()
+                    if (v.visibility != View.VISIBLE) {
+                        v.alpha = 0f
+                        v.visibility = View.VISIBLE
+                        v.animate().alpha(1f).setDuration(150).start()
+                    } else {
+                        v.alpha = 1f
+                    }
+                }
+            },
+            onHide = {
+                overlayView?.let { v ->
+                    v.animate().cancel()
+                    v.animate().alpha(0f).setDuration(150).withEndAction {
+                        v.visibility = View.GONE
+                    }.start()
+                }
+                feedbackView?.let { fv ->
+                    fv.visibility = View.GONE
+                    fv.alpha = 0f
+                }
+            },
+            onScheduleHide = { delayMs ->
+                handler.removeCallbacks(hideBubbleRunnable)
+                handler.postDelayed(hideBubbleRunnable, delayMs)
+            },
+            onCancelScheduledHide = {
+                handler.removeCallbacks(hideBubbleRunnable)
+            }
+        )
+        visibilityController = controller
+        controller.init(keyboardActive, onlyShowWithKeyboard)
     }
 
     private fun removeOverlay() {
+        handler.removeCallbacks(hideBubbleRunnable)
+        handler.removeCallbacks(checkKeyboardRunnable)
+        visibilityController = null
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         overlayView?.let {
             wm.removeView(it)
@@ -275,6 +395,9 @@ class WhisperAccessibilityService : AccessibilityService() {
             val bubbleParams = layoutParams ?: return@post
             val feedbackParams = feedbackLayoutParams ?: return@post
             val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+
+            // Don't show feedback popup if the bubble is hidden
+            if (overlayView?.visibility != View.VISIBLE) return@post
 
             view.text = text
             positionFeedback(feedbackParams, bubbleParams)
@@ -333,6 +456,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         pcmStream = ByteArrayOutputStream()
         audioRecord!!.startRecording()
         state = State.RECORDING
+        visibilityController?.onRecordingStarted()
         setBusy(false)
         setAppearance(COLOR_RECORDING)
         startPulse()
@@ -360,6 +484,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun stopAndTranscribe() {
         state = State.TRANSCRIBING
+        visibilityController?.onTranscribingStarted()
         stopPulse()
         setAppearance(COLOR_BUSY)
         setBusy(true)
@@ -426,9 +551,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 Log.e(TAG, "Local transcription failed", e)
                 handler.post {
                     toast("Local error: ${e.message}")
-                    state = State.IDLE
-                    setBusy(false)
-                    setAppearance(COLOR_IDLE)
+                    markIdle()
                 }
             }
         }
@@ -445,9 +568,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             } else {
                 handler.post {
                     toast("Error: ${result.error ?: "empty transcript"}")
-                    state = State.IDLE
-                    setBusy(false)
-                    setAppearance(COLOR_IDLE)
+                    markIdle()
                 }
             }
         }
@@ -483,9 +604,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 showFeedback("Gateway: ${result.error ?: "failed"}", 5000)
                 handler.post {
                     toast("Error: ${result.error ?: "gateway error"}")
-                    state = State.IDLE
-                    setBusy(false)
-                    setAppearance(COLOR_IDLE)
+                    markIdle()
                 }
             }
         }
@@ -509,9 +628,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                     cleanupGatewayStream()
                     handler.post {
                         toast("Gateway returned empty transcript")
-                        state = State.IDLE
-                        setBusy(false)
-                        setAppearance(COLOR_IDLE)
+                        markIdle()
                     }
                 }
             },
@@ -541,9 +658,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         cleanupGatewayStream()
         handler.post {
             injectText(text)
-            state = State.IDLE
-            setBusy(false)
-            setAppearance(COLOR_IDLE)
+            markIdle()
         }
     }
 
@@ -551,9 +666,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (text.isNullOrBlank()) {
             handler.post {
                 toast("No speech detected")
-                state = State.IDLE
-                setBusy(false)
-                setAppearance(COLOR_IDLE)
+                markIdle()
             }
             return
         }
@@ -566,9 +679,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 handler.post {
                     toast("Post-processing needs API key. Using raw text.")
                     injectText(text)
-                    state = State.IDLE
-                    setBusy(false)
-                    setAppearance(COLOR_IDLE)
+                    markIdle()
                 }
                 return
             }
@@ -582,17 +693,13 @@ class WhisperAccessibilityService : AccessibilityService() {
                     } else {
                         injectText(text, feedback = "Cleanup failed — raw copied to clipboard", feedbackDurationMs = 3000)
                     }
-                    state = State.IDLE
-                    setBusy(false)
-                    setAppearance(COLOR_IDLE)
+                    markIdle()
                 }
             }
         } else {
             handler.post {
                 injectText(text)
-                state = State.IDLE
-                setBusy(false)
-                setAppearance(COLOR_IDLE)
+                markIdle()
             }
         }
     }
@@ -600,9 +707,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun reset(msg: String) {
         cleanupGatewayStream()
         toast(msg)
-        state = State.IDLE
-        setBusy(false)
-        setAppearance(COLOR_IDLE)
+        markIdle()
     }
 
     // --- Text injection ---

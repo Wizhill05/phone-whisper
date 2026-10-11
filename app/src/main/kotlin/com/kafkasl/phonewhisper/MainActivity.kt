@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gatewayUrlRowSub: TextView
     private lateinit var gatewayTokenRow: View
     private lateinit var gatewayTokenRowSub: TextView
+    private lateinit var keyboardOnlySwitch: MaterialSwitch
     private lateinit var promptRow: LinearLayout
     private lateinit var modelContainer: LinearLayout
     private lateinit var promptContainer: LinearLayout
@@ -142,6 +143,23 @@ class MainActivity : AppCompatActivity() {
         val keyRow = settingsRow("OpenAI API Key", "Tap to set") { promptApiKey() }
         keyRowSub = keyRow.findViewWithTag("subtitle")
         root.addView(keyRow)
+
+        val kbSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("only_show_with_keyboard", true)
+            isClickable = false
+        }
+        keyboardOnlySwitch = kbSwitch
+        val keyboardOnlyRow = settingsRow(
+            "Only show with keyboard",
+            "Show dictation bubble when keyboard is open; hides after 10s idle",
+            kbSwitch
+        ) {
+            val newVal = !kbSwitch.isChecked
+            prefs().edit().putBoolean("only_show_with_keyboard", newVal).apply()
+            kbSwitch.isChecked = newVal
+            WhisperAccessibilityService.instance?.updateVisibilityPreference()
+        }
+        root.addView(keyboardOnlyRow)
 
         // --- VPS Gateway Section ---
         root.addView(sectionHeader("VPS gateway"))
@@ -355,6 +373,8 @@ class MainActivity : AppCompatActivity() {
         keyRowSub.text = if (apiKey.isBlank()) "Tap to set"
                          else if (apiKey.length > 7) "sk-...${apiKey.takeLast(4)}"
                          else "sk-...***"
+
+        keyboardOnlySwitch.isChecked = prefs().getBoolean("only_show_with_keyboard", true)
 
         val useGateway = prefs().getBoolean("use_gateway", false)
         val gatewayUrl = prefs().getString("gateway_url", "") ?: ""
