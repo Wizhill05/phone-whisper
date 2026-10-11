@@ -576,7 +576,10 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun activeModeLabel(): String = when {
         prefs().getBoolean("use_gateway", false) -> "VPS gateway"
-        prefs().getBoolean("use_local", true) && localTranscriber != null -> "Local model"
+        prefs().getBoolean("use_local", true) && localTranscriber != null -> {
+            if (prefs().getBoolean("clean_with_gateway", true)) "Local STT + Gateway cleanup"
+            else "Local model"
+        }
         prefs().getBoolean("use_local", true) -> "Local (no model — falls back to cloud)"
         else -> "Cloud (OpenAI)"
     }
@@ -667,6 +670,23 @@ class WhisperAccessibilityService : AccessibilityService() {
             handler.post {
                 toast("No speech detected")
                 markIdle()
+            }
+            return
+        }
+
+        val cleanWithGateway = prefs().getBoolean("clean_with_gateway", true)
+        val gatewayUrl = (prefs().getString("gateway_url", "") ?: "").trim()
+        val gatewayToken = prefs().getString("gateway_token", "") ?: ""
+
+        if (cleanWithGateway && gatewayUrl.isNotBlank() && gatewayToken.isNotBlank()) {
+            showFeedback("Polishing…", 1500)
+            val prompt = prefs().getString("post_processing_prompt", null)
+            GatewayCleanupClient.clean(text, gatewayUrl, gatewayToken, prompt) { result ->
+                if (result.error != null) {
+                    Log.w(TAG, "Gateway cleanup error: ${result.error}")
+                    showFeedback("Cleanup failed — used raw transcript", 3000)
+                }
+                finishWith(result.cleanText)
             }
             return
         }

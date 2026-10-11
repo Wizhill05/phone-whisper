@@ -30,6 +30,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var keyRowSub: TextView
     private lateinit var promptRowSub: TextView
     private lateinit var gatewayRowSub: TextView
+    private lateinit var cleanWithGatewayRowSub: TextView
     private lateinit var gatewayUrlRow: View
     private lateinit var gatewayUrlRowSub: TextView
     private lateinit var gatewayTokenRow: View
@@ -164,13 +165,30 @@ class MainActivity : AppCompatActivity() {
         // --- VPS Gateway Section ---
         root.addView(sectionHeader("VPS gateway"))
 
+        val cleanWithGatewaySwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("clean_with_gateway", true)
+            isClickable = false
+        }
+        val cleanWithGatewayRow = settingsRow(
+            "Clean up local STT via gateway",
+            "Transcribe on-device, then clean text via VPS LLM",
+            cleanWithGatewaySwitch
+        ) {
+            val newVal = !cleanWithGatewaySwitch.isChecked
+            prefs().edit().putBoolean("clean_with_gateway", newVal).apply()
+            cleanWithGatewaySwitch.isChecked = newVal
+            refresh()
+        }
+        cleanWithGatewayRowSub = cleanWithGatewayRow.findViewWithTag("subtitle")
+        root.addView(cleanWithGatewayRow)
+
         val gatewaySwitch = MaterialSwitch(this).apply {
             isChecked = prefs().getBoolean("use_gateway", false)
             isClickable = false
         }
         val gatewayRow = settingsRow(
-            "Use VPS gateway",
-            "Dictate via your own server (Wispr Flow style)",
+            "Stream audio to VPS gateway",
+            "Upload full audio to VPS for both ASR and LLM cleanup",
             gatewaySwitch
         ) {
             val newVal = !gatewaySwitch.isChecked
@@ -376,14 +394,17 @@ class MainActivity : AppCompatActivity() {
 
         keyboardOnlySwitch.isChecked = prefs().getBoolean("only_show_with_keyboard", true)
 
+        val cleanWithGateway = prefs().getBoolean("clean_with_gateway", true)
         val useGateway = prefs().getBoolean("use_gateway", false)
         val gatewayUrl = prefs().getString("gateway_url", "") ?: ""
         val gatewayToken = prefs().getString("gateway_token", "") ?: ""
-        gatewayRowSub.text = if (useGateway) "On — bubble dictates to your VPS" else "Off"
+        cleanWithGatewayRowSub.text = if (cleanWithGateway) "On — local speech sent to VPS LLM for cleanup" else "Off"
+        gatewayRowSub.text = if (useGateway) "On — audio streams to VPS" else "Off"
         gatewayUrlRowSub.text = gatewayUrlSubtitleText()
         gatewayTokenRowSub.text = gatewayTokenSubtitleText()
-        gatewayUrlRow.visibility = if (useGateway) View.VISIBLE else View.GONE
-        gatewayTokenRow.visibility = if (useGateway) View.VISIBLE else View.GONE
+        val showGatewayConfig = useGateway || cleanWithGateway
+        gatewayUrlRow.visibility = if (showGatewayConfig) View.VISIBLE else View.GONE
+        gatewayTokenRow.visibility = if (showGatewayConfig) View.VISIBLE else View.GONE
 
         val prompt = currentPrompt()
         promptRowSub.text = prompt
@@ -395,11 +416,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Ready logic
-        val localReady = useLocal && hasModel
+        val gatewayConfigured = gatewayUrl.isNotBlank() && gatewayToken.isNotBlank()
+        val localReady = useLocal && hasModel && (!cleanWithGateway || gatewayConfigured)
         val cloudReady = !useLocal && hasKey
         val postReady = !usePostProcessing || hasKey
-        val gatewayReady = useGateway && gatewayUrl.isNotBlank() && gatewayToken.isNotBlank()
-        // In gateway mode the gateway cleans server-side, so postReady does not apply.
+        val gatewayReady = useGateway && gatewayConfigured
         val ready = audio && acc && (gatewayReady || ((localReady || cloudReady) && postReady))
 
         statusSubtitle.text = if (ready) "Ready — tap the overlay dot to dictate" else "Setup required"
