@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The VPS dictation gateway speaks plain HTTP over the Tailscale tailnet.
+  Android blocks cleartext to external hosts by default (API 28+), so
+  permission is granted ONLY to the gateway's tailnet IP. If the VPS ever
+  gets a different tailnet IP, add the new <domain> entry here and in the
+  app's Gateway URL setting.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">100.122.152.101</domain>
+    </domain-config>
+</network-security-config>
