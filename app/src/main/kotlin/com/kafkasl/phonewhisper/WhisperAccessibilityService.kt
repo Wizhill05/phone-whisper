@@ -357,6 +357,8 @@ class WhisperAccessibilityService : AccessibilityService() {
         val pcm = pcmStream?.toByteArray() ?: ByteArray(0)
         pcmStream = null
 
+        showFeedback("Captured ${pcm.size} bytes of audio", 1500)
+
         if (pcm.isEmpty()) { reset("No audio captured"); return }
 
         if (prefs().getBoolean("use_gateway", false)) {
@@ -441,11 +443,15 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
 
         Log.i(TAG, "VPS gateway: POST $baseUrl/v1/dictation (wav ${wav.size} bytes)")
+        showFeedback("Sending ${wav.size} bytes to gateway…", 1500)
         DictationClient.dictate(wav, baseUrl, token) { result ->
             val text = result.text
             if (!text.isNullOrBlank()) {
+                Log.i(TAG, "VPS gateway: got ${text.length} chars")
                 finishWith(text)
             } else {
+                Log.w(TAG, "VPS gateway failed: ${result.error}")
+                showFeedback("Gateway: ${result.error ?: "failed"}", 5000)
                 handler.post {
                     toast("Error: ${result.error ?: "gateway error"}")
                     state = State.IDLE
