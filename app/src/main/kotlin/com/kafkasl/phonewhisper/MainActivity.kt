@@ -29,6 +29,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var accRowSub: TextView
     private lateinit var keyRowSub: TextView
     private lateinit var promptRowSub: TextView
+    private lateinit var gatewayRowSub: TextView
+    private lateinit var gatewayUrlRow: View
+    private lateinit var gatewayUrlRowSub: TextView
+    private lateinit var gatewayTokenRow: View
+    private lateinit var gatewayTokenRowSub: TextView
     private lateinit var promptRow: LinearLayout
     private lateinit var modelContainer: LinearLayout
     private lateinit var promptContainer: LinearLayout
@@ -137,6 +142,34 @@ class MainActivity : AppCompatActivity() {
         val keyRow = settingsRow("OpenAI API Key", "Tap to set") { promptApiKey() }
         keyRowSub = keyRow.findViewWithTag("subtitle")
         root.addView(keyRow)
+
+        // --- VPS Gateway Section ---
+        root.addView(sectionHeader("VPS gateway"))
+
+        val gatewaySwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("use_gateway", false)
+            isClickable = false
+        }
+        val gatewayRow = settingsRow(
+            "Use VPS gateway",
+            "Dictate via your own server (Wispr Flow style)",
+            gatewaySwitch
+        ) {
+            val newVal = !gatewaySwitch.isChecked
+            prefs().edit().putBoolean("use_gateway", newVal).apply()
+            gatewaySwitch.isChecked = newVal
+            refresh()
+        }
+        gatewayRowSub = gatewayRow.findViewWithTag("subtitle")
+        root.addView(gatewayRow)
+
+        gatewayUrlRow = settingsRow("Gateway URL", gatewayUrlSubtitleText()) { promptGatewayUrl() }
+        gatewayUrlRowSub = gatewayUrlRow.findViewWithTag("subtitle")
+        root.addView(gatewayUrlRow)
+
+        gatewayTokenRow = settingsRow("Gateway token", gatewayTokenSubtitleText()) { promptGatewayToken() }
+        gatewayTokenRowSub = gatewayTokenRow.findViewWithTag("subtitle")
+        root.addView(gatewayTokenRow)
 
         setContentView(ScrollView(this).apply {
             setBackgroundColor(attrColor(android.R.attr.colorBackground))
@@ -319,9 +352,18 @@ class MainActivity : AppCompatActivity() {
         promptRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
 
         val apiKey = prefs().getString("api_key", "") ?: ""
-        keyRowSub.text = if (apiKey.isBlank()) "Tap to set" 
-                         else if (apiKey.length > 7) "sk-...${apiKey.takeLast(4)}" 
+        keyRowSub.text = if (apiKey.isBlank()) "Tap to set"
+                         else if (apiKey.length > 7) "sk-...${apiKey.takeLast(4)}"
                          else "sk-...***"
+
+        val useGateway = prefs().getBoolean("use_gateway", false)
+        val gatewayUrl = prefs().getString("gateway_url", "") ?: ""
+        val gatewayToken = prefs().getString("gateway_token", "") ?: ""
+        gatewayRowSub.text = if (useGateway) "On — bubble dictates to your VPS" else "Off"
+        gatewayUrlRowSub.text = gatewayUrlSubtitleText()
+        gatewayTokenRowSub.text = gatewayTokenSubtitleText()
+        gatewayUrlRow.visibility = if (useGateway) View.VISIBLE else View.GONE
+        gatewayTokenRow.visibility = if (useGateway) View.VISIBLE else View.GONE
 
         val prompt = currentPrompt()
         promptRowSub.text = prompt
@@ -336,7 +378,9 @@ class MainActivity : AppCompatActivity() {
         val localReady = useLocal && hasModel
         val cloudReady = !useLocal && hasKey
         val postReady = !usePostProcessing || hasKey
-        val ready = audio && acc && (localReady || cloudReady) && postReady
+        val gatewayReady = useGateway && gatewayUrl.isNotBlank() && gatewayToken.isNotBlank()
+        // In gateway mode the gateway cleans server-side, so postReady does not apply.
+        val ready = audio && acc && (gatewayReady || ((localReady || cloudReady) && postReady))
 
         statusSubtitle.text = if (ready) "Ready — tap the overlay dot to dictate" else "Setup required"
         statusSubtitle.setTextColor(if (ready) attrColor(com.google.android.material.R.attr.colorPrimary) else attrColor(android.R.attr.textColorSecondary))
@@ -355,6 +399,49 @@ class MainActivity : AppCompatActivity() {
             .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
             .setPositiveButton("Save") { _, _ ->
                 prefs().edit().putString("api_key", input.text.toString().trim()).apply()
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun gatewayUrlSubtitleText(): String {
+        val url = prefs().getString("gateway_url", "") ?: ""
+        return if (url.isBlank()) "Tap to set" else url
+    }
+
+    private fun gatewayTokenSubtitleText(): String {
+        val token = prefs().getString("gateway_token", "") ?: ""
+        return if (token.isBlank()) "Tap to set" else "••••${token.takeLast(4)}"
+    }
+
+    private fun promptGatewayUrl() {
+        val input = EditText(this).apply {
+            hint = DEFAULT_GATEWAY_URL
+            setText(prefs().getString("gateway_url", DEFAULT_GATEWAY_URL))
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Gateway URL")
+            .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
+            .setPositiveButton("Save") { _, _ ->
+                prefs().edit().putString("gateway_url", input.text.toString().trim()).apply()
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promptGatewayToken() {
+        val input = EditText(this).apply {
+            hint = "Bearer token"
+            setText(prefs().getString("gateway_token", ""))
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Gateway Token")
+            .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
+            .setPositiveButton("Save") { _, _ ->
+                prefs().edit().putString("gateway_token", input.text.toString().trim()).apply()
                 refresh()
             }
             .setNegativeButton("Cancel", null)
@@ -485,5 +572,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val LP_MATCH = LinearLayout.LayoutParams.MATCH_PARENT
         private const val LP_WRAP = LinearLayout.LayoutParams.WRAP_CONTENT
+        private const val DEFAULT_GATEWAY_URL = "http://100.122.152.101:8899"
     }
 }
