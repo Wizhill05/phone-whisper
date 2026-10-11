@@ -168,21 +168,26 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun initLocalModel() {
-        val modelName = prefs().getString("model_name", "") ?: ""
-        if (modelName.isBlank()) {
-            // Auto-detect first available model
-            val models = LocalTranscriber.availableModels(this)
-            if (models.isNotEmpty()) {
-                Log.i(TAG, "Auto-detected model: ${models.first()}")
-                localTranscriber = LocalTranscriber.create(this, models.first())
+        try {
+            val modelName = prefs().getString("model_name", "") ?: ""
+            if (modelName.isBlank()) {
+                // Auto-detect first available model
+                val models = LocalTranscriber.availableModels(this)
+                if (models.isNotEmpty()) {
+                    Log.i(TAG, "Auto-detected model: ${models.first()}")
+                    localTranscriber = LocalTranscriber.create(this, models.first())
+                }
+            } else {
+                localTranscriber = LocalTranscriber.create(this, modelName)
             }
-        } else {
-            localTranscriber = LocalTranscriber.create(this, modelName)
-        }
-        if (localTranscriber != null) {
-            Log.i(TAG, "Local transcription ready")
-        } else {
-            Log.i(TAG, "No local model found, will use API")
+            if (localTranscriber != null) {
+                Log.i(TAG, "Local transcription ready")
+            } else {
+                Log.i(TAG, "No local model found, will use API")
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to initialize local model, falling back to API", t)
+            localTranscriber = null
         }
     }
 

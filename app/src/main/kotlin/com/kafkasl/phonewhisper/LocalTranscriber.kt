@@ -45,17 +45,20 @@ class LocalTranscriber private constructor(private val recognizer: OfflineRecogn
             }
 
             return try {
+                try {
+                    System.loadLibrary("onnxruntime")
+                } catch (_: Throwable) {}
                 val recognizer = OfflineRecognizer(assetManager = null, config = config)
                 Log.i(TAG, "Loaded model: $modelName")
                 LocalTranscriber(recognizer)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to load model: ${e.message}")
+            } catch (e: Throwable) {
+                Log.e(TAG, "Failed to load model: ${e.message}", e)
                 null
             }
         }
 
         /** Auto-detect model type from files present in the directory. */
-        private fun detectModelConfig(dir: File): OfflineRecognizerConfig? {
+        internal fun detectModelConfig(dir: File): OfflineRecognizerConfig? {
             val p = dir.absolutePath
             val tokensFile = ModelDownloader.findTokensFile(dir) ?: return null
             val tokens = tokensFile.absolutePath
@@ -127,15 +130,27 @@ class LocalTranscriber private constructor(private val recognizer: OfflineRecogn
             return null
         }
 
-        /** Find first file matching prefix (prefer int8 quantized). */
-        private fun findFile(dir: String, prefix: String): String? {
+        private fun matchesKeyword(name: String, keyword: String): Boolean {
+            return name.startsWith(keyword, ignoreCase = true) ||
+                name.contains("-$keyword", ignoreCase = true) ||
+                name.contains("_$keyword", ignoreCase = true) ||
+                name.contains(".$keyword", ignoreCase = true)
+        }
+
+        /** Find first file matching keyword (prefer int8 quantized). */
+        private fun findFile(dir: String, keyword: String): String? {
             val d = File(dir)
+            val files = d.listFiles() ?: return null
             // Prefer int8 quantized
-            d.listFiles()?.firstOrNull { it.name.startsWith(prefix) && it.name.contains("int8") }
-                ?.let { return it.absolutePath }
+            files.firstOrNull {
+                matchesKeyword(it.name, keyword) &&
+                    it.name.contains("int8", ignoreCase = true) &&
+                    (it.name.endsWith(".onnx") || it.name.endsWith(".ort"))
+            }?.let { return it.absolutePath }
             // Fallback to any onnx/ort
-            return d.listFiles()?.firstOrNull {
-                it.name.startsWith(prefix) && (it.name.endsWith(".onnx") || it.name.endsWith(".ort"))
+            return files.firstOrNull {
+                matchesKeyword(it.name, keyword) &&
+                    (it.name.endsWith(".onnx") || it.name.endsWith(".ort"))
             }?.absolutePath
         }
     }
