@@ -18,6 +18,7 @@ class PcmChunker(private val chunkBytes: Int) {
      * Appends [data]; returns the accumulated bytes once the buffer reaches
      * [chunkBytes], otherwise null.
      */
+    @Synchronized
     fun push(data: ByteArray): ByteArray? {
         buffer.write(data)
         if (buffer.size() >= chunkBytes) {
@@ -29,6 +30,7 @@ class PcmChunker(private val chunkBytes: Int) {
     }
 
     /** Returns any buffered remainder (and resets), or null when empty. */
+    @Synchronized
     fun flush(): ByteArray? {
         if (buffer.size() == 0) return null
         val out = buffer.toByteArray()

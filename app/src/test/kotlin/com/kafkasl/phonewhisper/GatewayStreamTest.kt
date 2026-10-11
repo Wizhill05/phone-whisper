@@ -103,4 +103,37 @@ class GatewayStreamTest {
         assertFalse(stream.send(byteArrayOf(1, 2, 3)))
         assertFalse(stream.finalize())
     }
+
+    @Test
+    fun test_chunks_sent_during_handshake_are_received_by_server() {
+        val receivedFrames = CountDownLatch(2) // 1 audio chunk + 1 finalize
+        val capturedBytes = mutableListOf<okio.ByteString>()
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                        capturedBytes.add(bytes)
+                        receivedFrames.countDown()
+                    }
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        receivedFrames.countDown()
+                        webSocket.send("""{"text":"ok"}""")
+                    }
+                }
+            )
+        )
+
+        val cap = ResultCapture()
+        val stream = GatewayStream(baseUrl(), "test-token")
+        stream.connect(CapturingListener(cap))
+        // Send chunk immediately while handshake is in progress
+        val sent = stream.send(byteArrayOf(42, 43))
+        assertTrue("pre-connect send should succeed by buffering", sent)
+        assertTrue(cap.connected.await(5, TimeUnit.SECONDS))
+        assertTrue(stream.finalize())
+        assertTrue(receivedFrames.await(5, TimeUnit.SECONDS))
+        assertEquals(1, capturedBytes.size)
+        assertEquals(42.toByte(), capturedBytes[0][0])
+        assertEquals(43.toByte(), capturedBytes[0][1])
+    }
 }

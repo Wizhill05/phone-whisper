@@ -60,9 +60,9 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var feedbackLayoutParams: WindowManager.LayoutParams? = null
     private var audioRecord: AudioRecord? = null
     private var pcmStream: ByteArrayOutputStream? = null
-    private var gatewayStream: GatewayStream? = null
-    private var streamController: GatewayStreamController? = null
-    private var pcmChunker: PcmChunker? = null
+    @Volatile private var gatewayStream: GatewayStream? = null
+    @Volatile private var streamController: GatewayStreamController? = null
+    @Volatile private var pcmChunker: PcmChunker? = null
     private val handler = Handler(Looper.getMainLooper())
     private val hideFeedback = Runnable {
         feedbackView?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction {
@@ -347,9 +347,10 @@ class WhisperAccessibilityService : AccessibilityService() {
                 val n = audioRecord?.read(buf, 0, buf.size) ?: break
                 if (n > 0) {
                     pcmStream?.write(buf, 0, n)
-                    if (streamController?.isActive == true) {
+                    val stream = gatewayStream
+                    if (stream != null) {
                         pcmChunker?.push(buf.copyOf(n))?.let { chunk ->
-                            gatewayStream?.send(chunk)
+                            stream.send(chunk)
                         }
                     }
                 }
@@ -379,10 +380,14 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (prefs().getBoolean("use_gateway", false)) {
             val stream = gatewayStream
             val controller = streamController
-            if (stream != null && controller?.isActive == true) {
+            if (stream != null && controller != null) {
                 controller.prepareFallback(pcm)
                 pcmChunker?.flush()?.let { stream.send(it) }
-                stream.finalize()
+                val finalized = stream.finalize()
+                if (!finalized) {
+                    cleanupGatewayStream()
+                    transcribeGateway(pcm)
+                }
             } else {
                 cleanupGatewayStream()
                 transcribeGateway(pcm)

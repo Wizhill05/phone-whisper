@@ -79,4 +79,25 @@ class GatewayStreamControllerTest {
         assertEquals("ok", delivered)
         assertEquals(0, fallbackCount)
     }
+
+    @Test
+    fun onResult_with_server_error_triggers_fallback_if_prepared() {
+        val c = controller()
+        c.onConnected()
+        c.prepareFallback(ByteArray(10))
+        c.onResult(JSONObject("""{"error":"internal model error"}"""))
+        assertFalse(c.isActive)
+        assertEquals(1, fallbackCount)
+        assertNull(delivered)
+    }
+
+    @Test
+    fun failure_before_connected_with_prepared_fallback_triggers_fallback() {
+        val c = controller()
+        c.prepareFallback(ByteArray(10))
+        c.onFailure("connection refused")
+        assertFalse(c.isActive)
+        assertEquals(1, fallbackCount)
+        assertNull(delivered)
+    }
 }

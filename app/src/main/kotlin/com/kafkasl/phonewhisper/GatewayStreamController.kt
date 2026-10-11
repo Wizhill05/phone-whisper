@@ -15,9 +15,11 @@ class GatewayStreamController(
     private val onConnected: (() -> Unit)? = null,
 ) : GatewayStream.Listener {
 
+    @Volatile
     var isActive: Boolean = false
         private set
 
+    @Volatile
     private var fallbackPcm: ByteArray? = null
 
     override fun onConnected() {
@@ -27,18 +29,29 @@ class GatewayStreamController(
 
     override fun onResult(json: JSONObject) {
         isActive = false
+        val fallback = fallbackPcm
         fallbackPcm = null
+
+        val error = json.optString("error")
+        if (error.isNotBlank()) {
+            if (fallback != null) {
+                onFallback(fallback)
+            } else {
+                onResult("")
+            }
+            return
+        }
+
         val cleanText = json.optString("clean_text")
         val text = if (cleanText.isNotBlank()) cleanText else json.optString("text")
         onResult(text.trim())
     }
 
     override fun onFailure(message: String) {
-        val wasActive = isActive
         isActive = false
         val fallback = fallbackPcm
         fallbackPcm = null
-        if (wasActive && fallback != null) {
+        if (fallback != null) {
             onFallback(fallback)
         }
     }
