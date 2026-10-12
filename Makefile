@@ -5,11 +5,19 @@ PHONE_HOST ?= pixel-5
 SSH_PORT   ?= 8022
 APK        := app/build/outputs/apk/debug/app-debug.apk
 
+# macOS defaults: Homebrew JDK 17 + default SDK location. On other systems
+# (Linux CI, containers) respect a pre-set JAVA_HOME / ANDROID_HOME instead.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
 export JAVA_HOME := /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
 export ANDROID_HOME := $(HOME)/Library/Android/sdk
 export PATH := $(JAVA_HOME)/bin:$(PATH)
+endif
+ANDROID_HOME ?= $(HOME)/android-sdk
+export ANDROID_HOME
+export ANDROID_SDK_ROOT := $(ANDROID_HOME)
 
-.PHONY: build test install adb-install push-model clean
+.PHONY: build test install adb-install clean
 
 build:
 	./gradlew assembleDebug
@@ -25,17 +33,6 @@ install: build
 
 adb-install: build
 	$(ANDROID_HOME)/platform-tools/adb install -r $(APK)
-
-## Push a model to the phone's internal storage (usage: make push-model MODEL=/path/to/model-dir)
-push-model:
-	@test -n "$(MODEL)" || (echo "Usage: make push-model MODEL=/path/to/model-dir" && exit 1)
-	$(ANDROID_HOME)/platform-tools/adb push $(MODEL)/ /data/local/tmp/$(notdir $(MODEL))/
-	$(ANDROID_HOME)/platform-tools/adb shell "run-as com.kafkasl.phonewhisper mkdir -p files/models/$(notdir $(MODEL))"
-	@for f in $$(ls $(MODEL)/*.onnx $(MODEL)/*.ort $(MODEL)/*.txt 2>/dev/null); do \
-		echo "  copying $$(basename $$f)..."; \
-		$(ANDROID_HOME)/platform-tools/adb shell "run-as com.kafkasl.phonewhisper cp /data/local/tmp/$(notdir $(MODEL))/$$(basename $$f) files/models/$(notdir $(MODEL))/$$(basename $$f)"; \
-	done
-	@echo "Model pushed: $(notdir $(MODEL))"
 
 clean:
 	./gradlew clean

@@ -10,8 +10,8 @@ Phone Whisper lets you speak into most apps without switching keyboards. Tap the
 
 It supports:
 
-- **Local on-device transcription** with sherpa-onnx
-- **Cloud transcription** with OpenAI Whisper
+- **Cloud transcription** through your own gateway (default path)
+- **Manual fallback** with direct OpenAI Whisper transcription
 - **Optional cleanup** with OpenAI to fix punctuation and grammar
 
 If you try it and it genuinely saves you time, consider [sponsoring](https://github.com/sponsors/kafkasl)
@@ -59,7 +59,7 @@ make adb-install
 1. A small overlay button floats on screen
 2. Tap once to start recording
 3. Tap again to stop
-4. Audio is transcribed locally or in the cloud
+4. Audio is transcribed in the cloud (gateway by default, OpenAI fallback)
 5. The text is inserted into the focused text field
 6. If insertion fails, the text is copied to the clipboard
 
@@ -70,9 +70,9 @@ make adb-install
 1. Open **Phone Whisper**
 2. Grant the **audio recording** permission
 3. Enable the **Accessibility Service**
-4. Choose your transcription mode:
-   - **Local**: download a model in the app
-   - **Cloud**: paste your OpenAI API key
+4. Set your **gateway URL and token** (transcription path)
+5. Optionally exempt the app from **battery optimization** so recording stays alive
+6. Optionally paste your **OpenAI API key** as a manual fallback
 
 Once setup is done, the floating button is ready.
 
@@ -84,34 +84,41 @@ It does **not** replace your keyboard. It does **not** run background automation
 
 ## Privacy
 
-Phone Whisper supports two modes:
+Phone Whisper is cloud-only: recorded audio is sent to your configured
+transcription gateway (default path), or directly to OpenAI's transcription
+API when you use the manual OpenAI fallback.
 
-- **Local mode**: audio stays on-device
-- **Cloud mode**: audio is sent directly from your device to OpenAI's transcription API
-- **Optional cleanup**: transcript text is sent directly from your device to OpenAI's chat API
+- **Gateway mode (default)**: audio is streamed/uploaded to the gateway URL
+  you configured, which returns the transcript (already cleaned when the
+  gateway provides `clean_text`).
+- **OpenAI fallback**: audio is sent directly from your device to OpenAI's
+  transcription API using your own API key.
+- **Optional cleanup**: transcript text may be sent to OpenAI's chat API
+  (OpenAI fallback path) or back to your gateway's cleanup endpoint
+  (gateway path, only when the result arrived uncleaned).
 
-I don't run a backend for this app. In cloud mode, requests go straight from your phone to OpenAI using your own API key.
+I don't run a backend for this app. In gateway mode, requests go from your
+phone to the gateway you configured. No audio stays on-device after
+dictation and no recordings are collected.
 
 Full policy: [PRIVACY.md](PRIVACY.md)
 
-## Local models
+## Speed architecture
 
-Models are stored in app storage under:
+Dictation is optimized for Wispr Flow-style latency with the same gateway
+protocol (`WS /v1/dictation/stream` with PCM chunks + `{"action":"finalize"}`,
+`POST /v1/dictation` multipart fallback, `POST /v1/cleanup` for raw-only
+results):
 
-```bash
-/data/data/com.kafkasl.phonewhisper/files/models/
-```
-
-Current catalog:
-
-| Model | Size | Notes |
-|---|---:|---|
-| Parakeet 110M | 100 MB | Best default |
-| Whisper Base | 199 MB | Solid baseline |
-| Parakeet 0.6B | 465 MB | Best quality |
-| Moonshine Tiny | 103 MB | Fastest |
-
-The app downloads and extracts models directly from the sherpa-onnx release archives.
+- The gateway stream pre-connects when the service starts and whenever the
+  bubble becomes visible, so tapping the mic never waits on a handshake.
+- The mic starts immediately on tap; audio queues and flushes on socket
+  open. If the socket is not up within the connect budget (8s default),
+  recording continues and uploads as one batch at stop time.
+- Results that already contain `clean_text` finish in a single pass — the
+  second cleanup call only runs for raw-text-only results.
+- Chunk sizes and stream timeouts are remotely tunable via `GET /v1/config`,
+  with hardcoded defaults when the gateway does not implement it yet.
 
 ## Development
 
@@ -146,8 +153,8 @@ Once text is inserted into the native input box, Termux sends it to the terminal
 - Accessibility permission is required for cross-app insertion
 - Some apps may block paste or text injection
 - Some apps use custom input surfaces instead of standard Android text fields
-- Local models are large
-- Cloud mode requires your own OpenAI API key
+- Gateway mode requires your own reachable gateway
+- OpenAI fallback requires your own OpenAI API key
 
 ## Support the project
 

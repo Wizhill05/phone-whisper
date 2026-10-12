@@ -14,9 +14,9 @@ import java.util.concurrent.TimeUnit
 /**
  * Lightweight HTTP client for remote text cleanup via the VPS gateway (POST /v1/cleanup).
  *
- * Designed to post locally transcribed text from on-device STT (sherpa-onnx)
- * directly to the fast LLM cleanup model on the gateway without sending audio.
- * On any network or parsing failure, it safely falls back to the original raw text.
+ * Used for the single separate cleanup pass when a dictation result contains
+ * raw text only (no clean_text). On any network or parsing failure, it safely
+ * falls back to the original raw text.
  */
 object GatewayCleanupClient {
 
