@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
  */
 object DictationClient {
 
-    data class Result(val text: String?, val error: String?)
+    data class Result(val text: String?, val error: String?, val isClean: Boolean = true)
 
     private const val CONNECT_TIMEOUT_SECONDS = 15L
     private const val READ_TIMEOUT_SECONDS = 60L
@@ -56,12 +56,18 @@ object DictationClient {
                             val json = JSONObject(responseBody)
                             // Prefer the cleaned transcript; fall back to raw text
                             // when the gateway's LLM cleanup failed (cleanup=failed).
-                            val text = if (!json.isNull("clean_text")) json.getString("clean_text")
-                            else json.optString("text", "")
-                            if (text.isBlank()) {
-                                callback(Result(null, "Empty transcript"))
+                            // isClean tells the caller whether a separate cleanup
+                            // pass is still needed (single-pass fast path when true).
+                            val clean = json.optString("clean_text")
+                            if (clean.isNotBlank()) {
+                                callback(Result(clean, null, isClean = true))
                             } else {
-                                callback(Result(text, null))
+                                val raw = json.optString("text", "")
+                                if (raw.isBlank()) {
+                                    callback(Result(null, "Empty transcript"))
+                                } else {
+                                    callback(Result(raw, null, isClean = false))
+                                }
                             }
                         } catch (e: Exception) {
                             callback(Result(null, "Could not parse gateway response: ${e.message ?: "bad json"}"))

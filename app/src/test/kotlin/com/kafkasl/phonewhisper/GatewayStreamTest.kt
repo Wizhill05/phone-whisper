@@ -105,8 +105,7 @@ class GatewayStreamTest {
     }
 
     @Test
-    fun test_chunks_sent_during_handshake_are_received_by_server() {
-        val receivedFrames = CountDownLatch(2) // 1 audio chunk + 1 finalize
+    fun test_chunks_sent_during_handshake_are_received_by_server() {        val receivedFrames = CountDownLatch(2) // 1 audio chunk + 1 finalize
         val capturedBytes = mutableListOf<okio.ByteString>()
         server.enqueue(
             MockResponse().withWebSocketUpgrade(
@@ -135,5 +134,51 @@ class GatewayStreamTest {
         assertEquals(1, capturedBytes.size)
         assertEquals(42.toByte(), capturedBytes[0][0])
         assertEquals(43.toByte(), capturedBytes[0][1])
+    }
+
+    @Test
+    fun test_connect_timeout_fires_when_handshake_never_completes() {
+        // A TCP black hole: accepts the connection but never speaks HTTP,
+        // so the WebSocket handshake never completes.
+        val blackHole = java.net.ServerSocket(0)
+        val acceptThread = Thread({ blackHole.accept() }, "blackhole-accept")
+        acceptThread.isDaemon = true
+        acceptThread.start()
+        try {
+            val cap = ResultCapture()
+            val stream = GatewayStream(
+                "http://127.0.0.1:${blackHole.localPort}",
+                "test-token",
+                connectTimeoutMs = 500L,
+            )
+            stream.connect(CapturingListener(cap))
+
+            assertTrue("connect timeout not reported", cap.failure.await(5, TimeUnit.SECONDS))
+            assertTrue((cap.message ?: "").lowercase().contains("timed out"))
+            stream.close()
+        } finally {
+            blackHole.close()
+        }
+    }
+
+    @Test
+    fun test_isConnected_reflects_socket_state() {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        webSocket.send("""{"text":"ok"}""")
+                    }
+                }
+            )
+        )
+
+        val cap = ResultCapture()
+        val stream = GatewayStream(baseUrl(), "test-token")
+        assertFalse(stream.isConnected)
+        stream.connect(CapturingListener(cap))
+        assertTrue("client never connected", cap.connected.await(5, TimeUnit.SECONDS))
+        assertTrue(stream.isConnected)
+        stream.close()
     }
 }

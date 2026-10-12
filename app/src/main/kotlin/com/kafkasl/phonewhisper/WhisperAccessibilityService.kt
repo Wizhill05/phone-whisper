@@ -1,9 +1,15 @@
 package com.kafkasl.phonewhisper
 
 import android.accessibilityservice.AccessibilityService
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.content.res.ColorStateList
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -27,6 +33,7 @@ import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import kotlin.concurrent.thread
 import kotlin.math.abs
@@ -49,6 +56,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         private const val COLOR_BUSY = 0xDD6B6B6B.toInt()
         private const val COLOR_FEEDBACK_BG = 0xEE1C1C1E.toInt()
         private const val COLOR_RING = 0xFFE8EAED.toInt()
+
+        private const val REC_NOTIFICATION_ID = 1
+        private const val REC_CHANNEL_ID = "phonewhisper_rec"
     }
 
     private enum class State { IDLE, RECORDING, TRANSCRIBING }
@@ -65,6 +75,9 @@ class WhisperAccessibilityService : AccessibilityService() {
     @Volatile private var gatewayStream: GatewayStream? = null
     @Volatile private var streamController: GatewayStreamController? = null
     @Volatile private var pcmChunker: PcmChunker? = null
+    @Volatile private var warmStream: GatewayStream? = null
+    @Volatile private var streamFailedEarly = false
+    @Volatile private var tuning: GatewayTuning.Tuning = GatewayTuning.DEFAULT
     private val handler = Handler(Looper.getMainLooper())
     private var visibilityController: BubbleVisibilityController? = null
     private val hideBubbleRunnable = Runnable {
@@ -73,14 +86,23 @@ class WhisperAccessibilityService : AccessibilityService() {
     private val checkKeyboardRunnable = Runnable {
         updateKeyboardState()
     }
+    /** While the mic is hot, give the stream its connect budget, then go batch. */
+    private val streamConnectTimeoutRunnable = Runnable {
+        if (state == State.RECORDING && streamController?.isActive != true) {
+            Log.w(TAG, "Gateway stream not connected in time; will upload at end")
+            streamFailedEarly = true
+            cleanupGatewayStream()
+            showFeedback("Streaming unavailable — will upload at end", 2000)
+        }
+    }
     private val hideFeedback = Runnable {
         feedbackView?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction {
             feedbackView?.visibility = View.GONE
         }?.start()
     }
 
-    // Local transcription engine (loaded lazily)
-    private var localTranscriber: LocalTranscriber? = null
+    // Cloud-only transcription: audio goes to the user's configured gateway.
+    // Direct OpenAI (TranscriberClient) remains only as a manual fallback.
 
     private val dp get() = resources.displayMetrics.density
     private val screenW get() = resources.displayMetrics.widthPixels
@@ -89,8 +111,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
         showOverlay()
-        // Try to load local model in background
-        thread { initLocalModel() }
+        loadTuning()
+        ensureWarmConnection()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -109,7 +131,10 @@ class WhisperAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         handler.removeCallbacks(hideBubbleRunnable)
         handler.removeCallbacks(checkKeyboardRunnable)
+        handler.removeCallbacks(streamConnectTimeoutRunnable)
         cleanupGatewayStream()
+        cleanupWarmStream()
+        stopMicForeground()
         instance = null
         removeOverlay()
         super.onDestroy()
@@ -165,34 +190,78 @@ class WhisperAccessibilityService : AccessibilityService() {
         setBusy(false)
         setAppearance(COLOR_IDLE)
         visibilityController?.onDictationFinished()
+        // Re-warm the next stream while idle so the next tap starts hot.
+        handler.post { ensureWarmConnection() }
     }
 
-    private fun initLocalModel() {
-        try {
-            val modelName = prefs().getString("model_name", "") ?: ""
-            if (modelName.isBlank()) {
-                // Auto-detect first available model
-                val models = LocalTranscriber.availableModels(this)
-                if (models.isNotEmpty()) {
-                    Log.i(TAG, "Auto-detected model: ${models.first()}")
-                    localTranscriber = LocalTranscriber.create(this, models.first())
-                }
-            } else {
-                localTranscriber = LocalTranscriber.create(this, modelName)
-            }
-            if (localTranscriber != null) {
-                Log.i(TAG, "Local transcription ready")
-            } else {
-                Log.i(TAG, "No local model found, will use API")
-            }
-        } catch (t: Throwable) {
-            Log.e(TAG, "Failed to initialize local model, falling back to API", t)
-            localTranscriber = null
+    private fun useGateway(): Boolean =
+        prefs().getBoolean("use_gateway", true)
+
+    private fun gatewayCreds(): Pair<String, String>? {
+        val baseUrl = (prefs().getString("gateway_url", "") ?: "").trim()
+        val token = prefs().getString("gateway_token", "") ?: ""
+        return if (baseUrl.isBlank() || token.isBlank()) null else baseUrl to token
+    }
+
+    private fun wsUrl(baseUrl: String): String =
+        baseUrl.replace("http://", "ws://").replace("https://", "wss://").trimEnd('/')
+
+    private fun loadTuning() {
+        val p = prefs()
+        tuning = GatewayTuning.fromMap(
+            mapOf(
+                "chunk_bytes" to p.getLong("tuning_chunk_bytes", GatewayTuning.DEFAULT.chunkBytes.toLong()),
+                "connect_timeout_ms" to p.getLong("tuning_connect_timeout_ms", GatewayTuning.DEFAULT.connectTimeoutMs),
+                "result_timeout_ms" to p.getLong("tuning_result_timeout_ms", GatewayTuning.DEFAULT.resultTimeoutMs),
+            )
+        )
+        val creds = gatewayCreds() ?: return
+        GatewayTuning.fetch(creds.first, creds.second) { fresh ->
+            tuning = fresh
+            prefs().edit()
+                .putLong("tuning_chunk_bytes", fresh.chunkBytes.toLong())
+                .putLong("tuning_connect_timeout_ms", fresh.connectTimeoutMs)
+                .putLong("tuning_result_timeout_ms", fresh.resultTimeoutMs)
+                .apply()
         }
     }
 
-    /** Reload local model (called from MainActivity when settings change) */
-    fun reloadModel() { thread { initLocalModel() } }
+    /**
+     * Pre-connects a warm gateway stream while idle so the mic never waits on
+     * a handshake. Called at service start, when the bubble becomes visible,
+     * and after each dictation. Never throws.
+     */
+    private fun ensureWarmConnection() {
+        try {
+            if (state != State.IDLE) return
+            if (!useGateway()) return
+            if (warmStream != null || gatewayStream != null) return
+            val creds = gatewayCreds() ?: return
+            val stream = GatewayStream(
+                wsUrl(creds.first), creds.second,
+                resultTimeoutMs = tuning.resultTimeoutMs,
+                connectTimeoutMs = tuning.connectTimeoutMs,
+            )
+            warmStream = stream
+            stream.connect(object : GatewayStream.Listener {
+                override fun onConnected() {}
+                override fun onResult(json: JSONObject) {}
+                override fun onFailure(message: String) {
+                    if (warmStream === stream) {
+                        stream.close()
+                        warmStream = null
+                    }
+                }
+            })
+        } catch (t: Throwable) {
+            Log.w(TAG, "Warm connection failed", t)
+        }
+    }
+
+    private fun cleanupWarmStream() {
+        warmStream?.close()
+        warmStream = null
+    }
 
     // --- Overlay ---
 
@@ -320,6 +389,8 @@ class WhisperAccessibilityService : AccessibilityService() {
                         v.alpha = 1f
                     }
                 }
+                // Bubble visible (keyboard shown): warm the stream now, not on tap.
+                handler.post { ensureWarmConnection() }
             },
             onHide = {
                 overlayView?.let { v ->
@@ -461,13 +532,25 @@ class WhisperAccessibilityService : AccessibilityService() {
         pcmStream = ByteArrayOutputStream()
         audioRecord!!.startRecording()
         state = State.RECORDING
+        streamFailedEarly = false
         visibilityController?.onRecordingStarted()
         setBusy(false)
         setAppearance(COLOR_RECORDING)
         startPulse()
+        startMicForeground()
 
-        if (prefs().getBoolean("use_gateway", false)) {
-            startGatewayStreaming()
+        if (useGateway() && gatewayCreds() != null) {
+            // Adopt the warm socket when live; otherwise connect fresh and
+            // drop the warming socket so it cannot dangle. Either way the
+            // mic is already hot — recording never waits.
+            val warming = warmStream
+            warmStream = null
+            val adopted = warming?.takeIf { it.isConnected } ?: run {
+                warming?.close()
+                null
+            }
+            startGatewayStreaming(adopted)
+            handler.postDelayed(streamConnectTimeoutRunnable, tuning.connectTimeoutMs)
         }
 
         thread {
@@ -493,12 +576,14 @@ class WhisperAccessibilityService : AccessibilityService() {
         stopPulse()
         setAppearance(COLOR_BUSY)
         setBusy(true)
+        handler.removeCallbacks(streamConnectTimeoutRunnable)
 
         showFeedback(activeModeLabel(), 2000)
 
         audioRecord?.stop()
         audioRecord?.release()
         audioRecord = null
+        stopMicForeground()
 
         val pcm = pcmStream?.toByteArray() ?: ByteArray(0)
         pcmStream = null
@@ -507,59 +592,33 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         if (pcm.isEmpty()) { reset("No audio captured"); return }
 
-        if (prefs().getBoolean("use_gateway", false)) {
-            val stream = gatewayStream
-            val controller = streamController
-            if (stream != null && controller != null) {
-                controller.prepareFallback(pcm)
-                pcmChunker?.flush()?.let { stream.send(it) }
-                val finalized = stream.finalize()
-                if (!finalized) {
+        if (useGateway()) {
+            if (!streamFailedEarly) {
+                val stream = gatewayStream
+                val controller = streamController
+                if (stream != null && controller != null) {
+                    controller.prepareFallback(pcm)
+                    pcmChunker?.flush()?.let { stream.send(it) }
+                    val finalized = stream.finalize()
+                    if (!finalized) {
+                        cleanupGatewayStream()
+                        transcribeGateway(pcm)
+                    }
+                } else {
                     cleanupGatewayStream()
                     transcribeGateway(pcm)
                 }
-            } else {
-                cleanupGatewayStream()
-                transcribeGateway(pcm)
+                return
             }
+            // Stream never connected while the mic was hot: batch upload.
+            streamFailedEarly = false
+            cleanupGatewayStream()
+            transcribeGateway(pcm)
             return
         }
 
-        val useLocal = prefs().getBoolean("use_local", true)
-        val local = localTranscriber
-
-        if (useLocal && local != null) {
-            transcribeLocal(pcm, local)
-        } else {
-            transcribeApi(pcm)
-        }
-    }
-
-    private fun transcribeLocal(pcm: ByteArray, transcriber: LocalTranscriber) {
-        thread {
-            try {
-                // Convert 16-bit PCM bytes to float samples
-                val samples = FloatArray(pcm.size / 2)
-                for (i in samples.indices) {
-                    val lo = pcm[i * 2].toInt() and 0xFF
-                    val hi = pcm[i * 2 + 1].toInt()
-                    samples[i] = ((hi shl 8) or lo).toShort().toFloat() / 32768f
-                }
-
-                val t0 = System.currentTimeMillis()
-                val text = transcriber.transcribe(samples, SAMPLE_RATE)
-                val ms = System.currentTimeMillis() - t0
-                Log.i(TAG, "Local transcription: ${ms}ms, ${samples.size / SAMPLE_RATE}s audio")
-
-                handleTranscriptionResult(text)
-            } catch (e: Exception) {
-                Log.e(TAG, "Local transcription failed", e)
-                handler.post {
-                    toast("Local error: ${e.message}")
-                    markIdle()
-                }
-            }
-        }
+        // Manual fallback: direct OpenAI transcription.
+        transcribeApi(pcm)
     }
 
     private fun transcribeApi(pcm: ByteArray) {
@@ -580,33 +639,33 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun activeModeLabel(): String = when {
-        prefs().getBoolean("use_gateway", false) -> "VPS gateway"
-        prefs().getBoolean("use_local", true) && localTranscriber != null -> {
-            if (prefs().getBoolean("clean_with_gateway", true)) "Local STT + Gateway cleanup"
-            else "Local model"
-        }
-        prefs().getBoolean("use_local", true) -> "Local (no model — falls back to cloud)"
+        useGateway() -> "VPS gateway"
         else -> "Cloud (OpenAI)"
     }
 
     private fun transcribeGateway(pcm: ByteArray) {
         val wav = WavWriter.encode(pcm)
-        val baseUrl = (prefs().getString("gateway_url", "") ?: "").trim()
-        val token = prefs().getString("gateway_token", "") ?: ""
-        if (baseUrl.isBlank() || token.isBlank()) {
+        val creds = gatewayCreds()
+        if (creds == null) {
             val msg = "Set gateway URL and token in the Phone Whisper app"
             showFeedback(msg, 5000)
             reset(msg)
             return
         }
+        val (baseUrl, token) = creds
 
         Log.i(TAG, "VPS gateway: POST $baseUrl/v1/dictation (wav ${wav.size} bytes)")
         showFeedback("Sending ${wav.size} bytes to gateway…", 1500)
         DictationClient.dictate(wav, baseUrl, token) { result ->
             val text = result.text
             if (!text.isNullOrBlank()) {
-                Log.i(TAG, "VPS gateway: got ${text.length} chars")
-                finishWith(text)
+                Log.i(TAG, "VPS gateway: got ${text.length} chars (clean=${result.isClean})")
+                if (result.isClean) {
+                    // Single pass: gateway already cleaned — finish immediately.
+                    finishWith(text)
+                } else {
+                    polishRawText(text)
+                }
             } else {
                 Log.w(TAG, "VPS gateway failed: ${result.error}")
                 showFeedback("Gateway: ${result.error ?: "failed"}", 5000)
@@ -618,28 +677,53 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startGatewayStreaming() {
-        val baseUrl = (prefs().getString("gateway_url", "") ?: "").trim()
-        val token = prefs().getString("gateway_token", "") ?: ""
-        if (baseUrl.isBlank() || token.isBlank()) {
+    private fun handleStreamResult(result: StreamResult) {
+        if (result.text.isBlank()) {
+            cleanupGatewayStream()
+            handler.post {
+                toast("Gateway returned empty transcript")
+                markIdle()
+            }
             return
         }
+        if (result.isClean) {
+            // Single pass: clean_text arrived — skip the second cleanup call.
+            finishWith(result.text)
+            return
+        }
+        polishRawText(result.text)
+    }
 
-        val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").trimEnd('/')
-        val stream = GatewayStream(wsUrl, token)
-        val chunker = PcmChunker(8000)
+    /** One separate cleanup call, only for raw-text-only results. */
+    private fun polishRawText(raw: String) {
+        val creds = gatewayCreds()
+        if (creds == null) {
+            finishWith(raw)
+            return
+        }
+        showFeedback("Polishing…", 1500)
+        val prompt = prefs().getString("post_processing_prompt", null)
+        GatewayCleanupClient.clean(raw, creds.first, creds.second, prompt) { result ->
+            if (result.error != null) {
+                Log.w(TAG, "Gateway cleanup error: ${result.error}")
+                showFeedback("Cleanup failed — used raw transcript", 3000)
+            }
+            finishWith(result.cleanText)
+        }
+    }
+
+    private fun startGatewayStreaming(adopted: GatewayStream? = null) {
+        val creds = gatewayCreds() ?: return
+        val (baseUrl, token) = creds
+
+        val stream = adopted ?: GatewayStream(
+            wsUrl(baseUrl), token,
+            resultTimeoutMs = tuning.resultTimeoutMs,
+            connectTimeoutMs = tuning.connectTimeoutMs,
+        )
+        val chunker = PcmChunker(tuning.chunkBytes)
         val controller = GatewayStreamController(
-            onResult = { text ->
-                if (text.isNotBlank()) {
-                    finishWith(text)
-                } else {
-                    cleanupGatewayStream()
-                    handler.post {
-                        toast("Gateway returned empty transcript")
-                        markIdle()
-                    }
-                }
-            },
+            onResult = { result -> handleStreamResult(result) },
             onFallback = { pcm ->
                 cleanupGatewayStream()
                 transcribeGateway(pcm)
@@ -652,7 +736,12 @@ class WhisperAccessibilityService : AccessibilityService() {
         gatewayStream = stream
         pcmChunker = chunker
         streamController = controller
-        stream.connect(controller)
+        if (adopted != null) {
+            stream.setListener(controller)
+            controller.onConnected()
+        } else {
+            stream.connect(controller)
+        }
     }
 
     private fun cleanupGatewayStream() {
@@ -679,23 +768,6 @@ class WhisperAccessibilityService : AccessibilityService() {
             return
         }
 
-        val cleanWithGateway = prefs().getBoolean("clean_with_gateway", true)
-        val gatewayUrl = (prefs().getString("gateway_url", "") ?: "").trim()
-        val gatewayToken = prefs().getString("gateway_token", "") ?: ""
-
-        if (cleanWithGateway && gatewayUrl.isNotBlank() && gatewayToken.isNotBlank()) {
-            showFeedback("Polishing…", 1500)
-            val prompt = prefs().getString("post_processing_prompt", null)
-            GatewayCleanupClient.clean(text, gatewayUrl, gatewayToken, prompt) { result ->
-                if (result.error != null) {
-                    Log.w(TAG, "Gateway cleanup error: ${result.error}")
-                    showFeedback("Cleanup failed — used raw transcript", 3000)
-                }
-                finishWith(result.cleanText)
-            }
-            return
-        }
-
         val usePostProcessing = prefs().getBoolean("use_post_processing", false)
         val apiKey = prefs().getString("api_key", "") ?: ""
 
@@ -710,7 +782,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             }
 
             val prompt = prefs().getString("post_processing_prompt", PostProcessor.DEFAULT_PROMPT) ?: PostProcessor.DEFAULT_PROMPT
-            
+
             PostProcessor.process(text, prompt, apiKey) { result ->
                 handler.post {
                     if (result.text != null && result.text.isNotBlank()) {
@@ -731,6 +803,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun reset(msg: String) {
         cleanupGatewayStream()
+        stopMicForeground()
         toast(msg)
         markIdle()
     }
@@ -840,6 +913,26 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
 
+        // First: cursor-aware set-text (commitText equivalent) with verification.
+        if (node.isEditable || node.className?.toString()?.contains("EditText") == true) {
+            val current = node.text?.toString().orEmpty()
+            val start = if (node.textSelectionStart >= 0) node.textSelectionStart else current.length
+            val end = if (node.textSelectionEnd >= 0) node.textSelectionEnd else start
+            val updated = TextInserter.buildUpdatedText(current, start, end, text)
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    updated
+                )
+            }
+            val setTextOk = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            Log.i(TAG, "ACTION_SET_TEXT (verified) => $setTextOk")
+            // Re-read the node: the snapshot above predates performAction.
+            if (setTextOk && node.refresh() && TextInserter.verifyInserted(node.text, text)) {
+                return true
+            }
+        }
+
         findCustomPasteAction(node)?.let { action ->
             val ok = node.performAction(action.id)
             Log.i(TAG, "Custom action '${action.label}' (${action.id}) => $ok")
@@ -854,9 +947,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             val current = node.text?.toString().orEmpty()
             val start = if (node.textSelectionStart >= 0) node.textSelectionStart else current.length
             val end = if (node.textSelectionEnd >= 0) node.textSelectionEnd else start
-            val replacementStart = minOf(start, end)
-            val replacementEnd = maxOf(start, end)
-            val updated = current.replaceRange(replacementStart, replacementEnd, text)
+            val updated = TextInserter.buildUpdatedText(current, start, end, text)
             val args = Bundle().apply {
                 putCharSequence(
                     AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -884,6 +975,44 @@ class WhisperAccessibilityService : AccessibilityService() {
             TAG,
             "$prefix package=${node.packageName} class=${node.className} focused=${node.isFocused} editable=${node.isEditable} text=${node.text} desc=${node.contentDescription} actions=[$actions]"
         )
+    }
+
+    // --- Mic foreground keep-alive ---
+
+    /** Keeps recording/streaming alive under a microphone foreground service. */
+    private fun startMicForeground() {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(
+                NotificationChannel(REC_CHANNEL_ID, "Dictation", NotificationManager.IMPORTANCE_LOW)
+            )
+            val intent = Intent(this, MainActivity::class.java)
+            val pending = PendingIntent.getActivity(
+                this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = Notification.Builder(this, REC_CHANNEL_ID)
+                .setContentTitle("Phone Whisper recording")
+                .setContentText("Tap the bubble again to stop")
+                .setSmallIcon(R.drawable.ic_mic)
+                .setContentIntent(pending)
+                .setOngoing(true)
+                .build()
+            startForeground(
+                REC_NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not start mic foreground service", t)
+        }
+    }
+
+    private fun stopMicForeground() {
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not stop mic foreground service", t)
+        }
     }
 
     private fun prefs() = getSharedPreferences("phonewhisper", MODE_PRIVATE)

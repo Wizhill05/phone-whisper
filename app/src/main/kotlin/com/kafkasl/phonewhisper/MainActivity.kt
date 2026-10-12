@@ -4,11 +4,11 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.graphics.Color
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
-import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -16,39 +16,28 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.google.android.material.button.MaterialButton
-import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.radiobutton.MaterialRadioButton
-import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusSubtitle: TextView
     private lateinit var audioRowSub: TextView
     private lateinit var accRowSub: TextView
+    private lateinit var batteryRow: View
+    private lateinit var batteryRowSub: TextView
     private lateinit var keyRowSub: TextView
     private lateinit var promptRowSub: TextView
     private lateinit var gatewayRowSub: TextView
-    private lateinit var cleanWithGatewayRowSub: TextView
     private lateinit var gatewayUrlRow: View
     private lateinit var gatewayUrlRowSub: TextView
     private lateinit var gatewayTokenRow: View
     private lateinit var gatewayTokenRowSub: TextView
     private lateinit var keyboardOnlySwitch: MaterialSwitch
     private lateinit var promptRow: LinearLayout
-    private lateinit var modelContainer: LinearLayout
     private lateinit var promptContainer: LinearLayout
 
-    private val modelRows = mutableMapOf<String, ModelRowViews>()
     private val promptRows = mutableMapOf<String, PromptRowViews>()
-
-    private data class ModelRowViews(
-        val radio: MaterialRadioButton,
-        val progress: LinearProgressIndicator,
-        val subtitle: TextView,
-        val dlBtn: MaterialButton
-    )
 
     private data class PromptRowViews(
         val radio: MaterialRadioButton,
@@ -75,7 +64,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- Setup Section ---
         root.addView(sectionHeader("Setup"))
-        
+
         val audioRow = settingsRow("Audio permission", "Checking...") {
             if (!hasPerm(Manifest.permission.RECORD_AUDIO)) {
                 ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1)
@@ -90,31 +79,15 @@ class MainActivity : AppCompatActivity() {
         accRowSub = accRow.findViewWithTag("subtitle")
         root.addView(accRow)
 
-        // --- Engine Section ---
-        
-        val isCloud = !prefs().getBoolean("use_local", true)
-        
-        val cloudSwitch = MaterialSwitch(this).apply {
-            isChecked = isCloud
-            isClickable = false
+        batteryRow = settingsRow("Battery optimization", "Checking...") {
+            requestBatteryExemption()
         }
-        val cloudRow = settingsRow("Use cloud transcription", "Requires OpenAI API key", cloudSwitch) {
-            val newCloud = !cloudSwitch.isChecked
-            prefs().edit().putBoolean("use_local", !newCloud).apply()
-            cloudSwitch.isChecked = newCloud
-            refresh()
-        }
-        root.addView(cloudRow)
-
-        // Local Models section
-        modelContainer = vertical(0)
-        modelContainer.addView(sectionHeader("Local models"))
-        for (m in MODEL_CATALOG) modelContainer.addView(buildModelRow(m))
-        root.addView(modelContainer)
+        batteryRowSub = batteryRow.findViewWithTag("subtitle")
+        root.addView(batteryRow)
 
         // --- Post-Processing Section ---
         root.addView(sectionHeader("Post-Processing"))
-        
+
         val isPostProcessing = prefs().getBoolean("use_post_processing", false)
         val postProcessSwitch = MaterialSwitch(this).apply {
             isChecked = isPostProcessing
@@ -140,7 +113,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- Settings Section ---
         root.addView(sectionHeader("Settings"))
-        
+
         val keyRow = settingsRow("OpenAI API Key", "Tap to set") { promptApiKey() }
         keyRowSub = keyRow.findViewWithTag("subtitle")
         root.addView(keyRow)
@@ -165,30 +138,13 @@ class MainActivity : AppCompatActivity() {
         // --- VPS Gateway Section ---
         root.addView(sectionHeader("VPS gateway"))
 
-        val cleanWithGatewaySwitch = MaterialSwitch(this).apply {
-            isChecked = prefs().getBoolean("clean_with_gateway", true)
-            isClickable = false
-        }
-        val cleanWithGatewayRow = settingsRow(
-            "Clean up local STT via gateway",
-            "Transcribe on-device, then clean text via VPS LLM",
-            cleanWithGatewaySwitch
-        ) {
-            val newVal = !cleanWithGatewaySwitch.isChecked
-            prefs().edit().putBoolean("clean_with_gateway", newVal).apply()
-            cleanWithGatewaySwitch.isChecked = newVal
-            refresh()
-        }
-        cleanWithGatewayRowSub = cleanWithGatewayRow.findViewWithTag("subtitle")
-        root.addView(cleanWithGatewayRow)
-
         val gatewaySwitch = MaterialSwitch(this).apply {
-            isChecked = prefs().getBoolean("use_gateway", false)
+            isChecked = prefs().getBoolean("use_gateway", true)
             isClickable = false
         }
         val gatewayRow = settingsRow(
-            "Stream audio to VPS gateway",
-            "Upload full audio to VPS for both ASR and LLM cleanup",
+            "Transcribe via VPS gateway",
+            "Streams audio to your gateway for fast ASR + cleanup",
             gatewaySwitch
         ) {
             val newVal = !gatewaySwitch.isChecked
@@ -215,7 +171,7 @@ class MainActivity : AppCompatActivity() {
         if (!hasPerm(Manifest.permission.RECORD_AUDIO)) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1)
         }
-        
+
         refresh()
     }
 
@@ -223,120 +179,6 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(c: Int, p: Array<String>, r: IntArray) {
         super.onRequestPermissionsResult(c, p, r); refresh()
     }
-
-    // --- Model Rows ---
-
-    private fun buildModelRow(model: Model): View {
-        val radio = MaterialRadioButton(this).apply {
-            isClickable = false
-            buttonTintList = ColorStateList.valueOf(attrColor(com.google.android.material.R.attr.colorPrimary))
-        }
-        val dlBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialIconButtonStyle).apply {
-            text = "↓"
-            textSize = 18f
-            setTextColor(attrColor(com.google.android.material.R.attr.colorPrimary))
-            setOnClickListener { onModelAction(model) }
-        }
-        
-        val progress = LinearProgressIndicator(this).apply {
-            visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(4)).apply {
-                topMargin = dp(8)
-            }
-        }
-
-        val rightContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(dlBtn)
-            addView(radio)
-        }
-
-        val row = settingsRow(
-            if (model.recommended) model.name else model.name,
-            "${model.quality} · ${model.sizeMb} MB",
-            rightContainer
-        ) {
-            onModelAction(model)
-        }
-        
-        val textContainer = row.getChildAt(0) as LinearLayout
-        textContainer.addView(progress)
-        
-        modelRows[model.archive] = ModelRowViews(
-            radio, progress, textContainer.findViewWithTag("subtitle"), dlBtn
-        )
-        refreshCard(model)
-        
-        return row
-    }
-
-    private fun onModelAction(model: Model) {
-        val views = modelRows[model.archive] ?: return
-
-        if (ModelDownloader.isInstalled(this, model)) {
-            selectModel(model.archive)
-            return
-        }
-
-        if (ModelDownloader.isDownloading(model)) {
-            return
-        }
-
-        views.dlBtn.isEnabled = false
-        views.progress.visibility = View.VISIBLE
-        views.progress.isIndeterminate = true
-        views.subtitle.text = "Starting download..."
-
-        ModelDownloader.download(this, model) { state ->
-            runOnUiThread {
-                when (state) {
-                    is DownloadState.Downloading -> {
-                        views.progress.isIndeterminate = false
-                        views.progress.progress = (state.progress * 100).toInt()
-                        views.subtitle.text = "Downloading: ${(state.progress * 100).toInt()}%"
-                    }
-                    is DownloadState.Extracting -> {
-                        views.progress.isIndeterminate = true
-                        views.subtitle.text = "Extracting..."
-                    }
-                    is DownloadState.Done -> {
-                        views.progress.visibility = View.GONE
-                        refreshAllCards()
-                        selectModel(model.archive)
-                        toast("${model.name} ready!")
-                    }
-                    is DownloadState.Error -> {
-                        views.progress.visibility = View.GONE
-                        views.subtitle.text = "Error: ${state.message}"
-                        views.dlBtn.isEnabled = true
-                    }
-                }
-            }
-        }
-    }
-
-    private fun selectModel(archive: String) {
-        prefs().edit().putString("model_name", archive).apply()
-        WhisperAccessibilityService.instance?.reloadModel()
-        refreshAllCards(); refresh()
-    }
-
-    private fun refreshCard(model: Model) {
-        val views = modelRows[model.archive] ?: return
-        val active = prefs().getString("model_name", "") == model.archive
-        val installed = ModelDownloader.isInstalled(this, model)
-        
-        views.radio.isChecked = active
-        views.radio.visibility = if (installed) View.VISIBLE else View.GONE
-        views.dlBtn.visibility = if (installed) View.GONE else View.VISIBLE
-        
-        if (views.progress.visibility == View.GONE) {
-            views.subtitle.text = "${model.quality} · ${model.sizeMb} MB"
-        }
-    }
-
-    private fun refreshAllCards() = MODEL_CATALOG.forEach { refreshCard(it) }
 
     // --- Prompt Rows ---
 
@@ -382,59 +224,67 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         val audio = hasPerm(Manifest.permission.RECORD_AUDIO)
         val acc = WhisperAccessibilityService.instance != null
-        val useLocal = prefs().getBoolean("use_local", true)
         val usePostProcessing = prefs().getBoolean("use_post_processing", false)
         val hasKey = !prefs().getString("api_key", "").isNullOrBlank()
-        val hasModel = LocalTranscriber.availableModels(this).isNotEmpty()
 
         audioRowSub.text = if (audio) "Granted" else "Tap to grant permission"
         accRowSub.text = if (acc) "Enabled" else "Tap to enable in settings"
 
-        modelContainer.visibility = if (useLocal) View.VISIBLE else View.GONE
+        batteryRowSub.text = if (isBatteryExempt()) "Exempt — recording stays alive"
+        else "Tap to exempt Phone Whisper (recommended)"
+
         promptContainer.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
         promptRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
 
         val apiKey = prefs().getString("api_key", "") ?: ""
-        keyRowSub.text = if (apiKey.isBlank()) "Tap to set"
+        keyRowSub.text = if (apiKey.isBlank()) "Tap to set (fallback only)"
                          else if (apiKey.length > 7) "sk-...${apiKey.takeLast(4)}"
                          else "sk-...***"
 
         keyboardOnlySwitch.isChecked = prefs().getBoolean("only_show_with_keyboard", true)
 
-        val cleanWithGateway = prefs().getBoolean("clean_with_gateway", true)
-        val useGateway = prefs().getBoolean("use_gateway", false)
+        val useGateway = prefs().getBoolean("use_gateway", true)
         val gatewayUrl = prefs().getString("gateway_url", "") ?: ""
         val gatewayToken = prefs().getString("gateway_token", "") ?: ""
-        cleanWithGatewayRowSub.text = if (cleanWithGateway) "On — local speech sent to VPS LLM for cleanup" else "Off"
-        gatewayRowSub.text = if (useGateway) "On — audio streams to VPS" else "Off"
+        gatewayRowSub.text = if (useGateway) "On — audio streams to VPS" else "Off — OpenAI fallback"
         gatewayUrlRowSub.text = gatewayUrlSubtitleText()
         gatewayTokenRowSub.text = gatewayTokenSubtitleText()
-        val showGatewayConfig = useGateway || cleanWithGateway
-        gatewayUrlRow.visibility = if (showGatewayConfig) View.VISIBLE else View.GONE
-        gatewayTokenRow.visibility = if (showGatewayConfig) View.VISIBLE else View.GONE
+        gatewayUrlRow.visibility = if (useGateway) View.VISIBLE else View.GONE
+        gatewayTokenRow.visibility = if (useGateway) View.VISIBLE else View.GONE
 
         val prompt = currentPrompt()
         promptRowSub.text = prompt
 
-        val cur = prefs().getString("model_name", "") ?: ""
-        if (cur.isBlank() || !File(filesDir, "models/$cur").exists()) {
-            MODEL_CATALOG.firstOrNull { ModelDownloader.isInstalled(this, it) }
-                ?.let { selectModel(it.archive) }
-        }
-
-        // Ready logic
+        // Ready logic: gateway is the default path; OpenAI key is the manual fallback.
         val gatewayConfigured = gatewayUrl.isNotBlank() && gatewayToken.isNotBlank()
-        val localReady = useLocal && hasModel && (!cleanWithGateway || gatewayConfigured)
-        val cloudReady = !useLocal && hasKey
-        val postReady = !usePostProcessing || hasKey
         val gatewayReady = useGateway && gatewayConfigured
-        val ready = audio && acc && (gatewayReady || ((localReady || cloudReady) && postReady))
+        val cloudReady = !useGateway && hasKey
+        val postReady = !usePostProcessing || hasKey
+        val ready = audio && acc && (gatewayReady || cloudReady) && postReady
 
         statusSubtitle.text = if (ready) "Ready — tap the overlay dot to dictate" else "Setup required"
         statusSubtitle.setTextColor(if (ready) attrColor(com.google.android.material.R.attr.colorPrimary) else attrColor(android.R.attr.textColorSecondary))
-        
-        refreshAllCards()
+
         refreshPromptRows()
+    }
+
+    private fun isBatteryExempt(): Boolean {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun requestBatteryExemption() {
+        if (isBatteryExempt()) return
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
     }
 
     private fun promptApiKey() {
@@ -540,13 +390,13 @@ class MainActivity : AppCompatActivity() {
         val textContainer = vertical(0).apply {
             layoutParams = LinearLayout.LayoutParams(0, LP_WRAP, 1f)
         }
-        
+
         textContainer.addView(TextView(this).apply {
             text = title
             textSize = 18f
             setTextColor(attrColor(android.R.attr.textColorPrimary))
         })
-        
+
         textContainer.addView(TextView(this).apply {
             tag = "subtitle"
             text = subtitle

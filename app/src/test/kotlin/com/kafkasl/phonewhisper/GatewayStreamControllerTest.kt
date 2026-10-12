@@ -9,12 +9,13 @@ import org.junit.Test
 
 class GatewayStreamControllerTest {
 
-    private var delivered: String? = null
+    private var delivered: StreamResult? = null
     private var fallbackCount = 0
+    private var fallbackPcm: ByteArray? = null
 
     private fun controller() = GatewayStreamController(
         onResult = { delivered = it },
-        onFallback = { fallbackCount++ },
+        onFallback = { fallbackPcm = it; fallbackCount++ },
     )
 
     @Test
@@ -30,7 +31,8 @@ class GatewayStreamControllerTest {
         c.onConnected()
         c.onResult(JSONObject("""{"clean_text":"We ship Friday.","text":"so um we ship friday"}"""))
         assertFalse(c.isActive)
-        assertEquals("We ship Friday.", delivered)
+        assertEquals("We ship Friday.", delivered?.text)
+        assertTrue(delivered?.isClean == true)
     }
 
     @Test
@@ -38,7 +40,17 @@ class GatewayStreamControllerTest {
         val c = controller()
         c.onConnected()
         c.onResult(JSONObject("""{"text":"raw transcript only"}"""))
-        assertEquals("raw transcript only", delivered)
+        assertEquals("raw transcript only", delivered?.text)
+        assertFalse(delivered?.isClean == true)
+    }
+
+    @Test
+    fun onResult_raw_only_is_not_clean() {
+        val c = controller()
+        c.onConnected()
+        c.onResult(JSONObject("""{"text":"raw transcript","cleanup":"failed"}"""))
+        assertEquals("raw transcript", delivered?.text)
+        assertFalse(delivered?.isClean == true)
     }
 
     @Test
@@ -46,7 +58,7 @@ class GatewayStreamControllerTest {
         val c = controller()
         c.onConnected()
         c.onResult(JSONObject("""{"clean_text":""}"""))
-        assertEquals("", delivered)
+        assertEquals("", delivered?.text)
     }
 
     @Test
@@ -58,6 +70,17 @@ class GatewayStreamControllerTest {
         assertFalse(c.isActive)
         assertEquals(1, fallbackCount)
         assertNull(delivered)
+    }
+
+    @Test
+    fun fallback_receives_prepared_pcm() {
+        val c = controller()
+        c.onConnected()
+        val pcm = ByteArray(10) { it.toByte() }
+        c.prepareFallback(pcm)
+        c.onFailure("boom")
+        assertEquals(1, fallbackCount)
+        assertEquals(pcm.toList(), fallbackPcm?.toList())
     }
 
     @Test
@@ -76,7 +99,7 @@ class GatewayStreamControllerTest {
         c.prepareFallback(ByteArray(10))
         c.onResult(JSONObject("""{"text":"ok"}"""))
         c.onFailure("watchdog fired late")
-        assertEquals("ok", delivered)
+        assertEquals("ok", delivered?.text)
         assertEquals(0, fallbackCount)
     }
 
@@ -89,6 +112,18 @@ class GatewayStreamControllerTest {
         assertFalse(c.isActive)
         assertEquals(1, fallbackCount)
         assertNull(delivered)
+    }
+
+    @Test
+    fun onConnected_callback_fires() {
+        var connected = 0
+        val c = GatewayStreamController(
+            onResult = {},
+            onFallback = {},
+            onConnected = { connected++ },
+        )
+        c.onConnected()
+        assertEquals(1, connected)
     }
 
     @Test

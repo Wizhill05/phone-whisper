@@ -55,6 +55,7 @@ class DictationClientTest {
 
         assertNull(result.error)
         assertEquals("We ship Monday.", result.text)
+        assertTrue(result.isClean)
 
         val request = server.takeRequest()
         assertEquals("/v1/dictation", request.path)
@@ -78,6 +79,7 @@ class DictationClientTest {
 
         assertNull(result.error)
         assertEquals("raw transcript", result.text)
+        assertTrue(!result.isClean)
     }
 
     @Test
