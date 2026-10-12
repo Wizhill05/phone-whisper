@@ -10,6 +10,9 @@ Phone Whisper is cloud-only. There is no on-device transcription mode.
 
 Recorded audio is streamed or uploaded from the device to the transcription
 gateway you configured (gateway URL + token in the app) to generate text.
+The reference gateway backend uses Google's Gemini API (`gemini-3.5-transcribe`
+for transcription, `gemini-3.5-flash-lite` for cleanup) under the gateway
+operator's API key, so gateway audio is processed by Google.
 When the gateway returns an already-cleaned transcript, no further request
 is made; when it returns raw text only, that text is sent back to the
 gateway's cleanup endpoint for polishing.

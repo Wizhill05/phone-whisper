@@ -119,6 +119,24 @@ results):
   second cleanup call only runs for raw-text-only results.
 - Chunk sizes and stream timeouts are remotely tunable via `GET /v1/config`,
   with hardcoded defaults when the gateway does not implement it yet.
+  Supported keys: `chunk_bytes`, `connect_timeout_ms`, `result_timeout_ms`.
+
+## Gateway backend (reference: Gemini)
+
+The reference gateway implementation sends the 16 kHz mono WAV directly to
+Google's Gemini API — no self-hosted model needed:
+
+- Verbatim transcription: `gemini-3.5-transcribe` (returns `clean_text`
+  handling: silence yields no transcript parts, never hallucinated text).
+- Polish pass: `gemini-3.5-flash-lite` with the user's post-processing
+  prompt; its output becomes `clean_text`, so the app finishes in one pass.
+- Inline audio limit is 20 MB per request (~10 minutes at 16 kHz mono),
+  far above tap-to-stop dictation sizes.
+
+This means gateway audio is processed by Google under your own API key —
+see [PRIVACY.md](PRIVACY.md). A minimal, live-tested backend is included
+as `gateway/gemini_backend.py`: `dictate(wav_bytes, prompt)` returns
+`{"text", "clean_text"}` behind `GEMINI_API_KEY`.
 
 ## Development
 

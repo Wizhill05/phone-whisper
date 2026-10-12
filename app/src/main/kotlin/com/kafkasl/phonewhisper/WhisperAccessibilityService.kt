@@ -927,7 +927,8 @@ class WhisperAccessibilityService : AccessibilityService() {
             }
             val setTextOk = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             Log.i(TAG, "ACTION_SET_TEXT (verified) => $setTextOk")
-            if (setTextOk && TextInserter.verifyInserted(node.text, text)) {
+            // Re-read the node: the snapshot above predates performAction.
+            if (setTextOk && node.refresh() && TextInserter.verifyInserted(node.text, text)) {
                 return true
             }
         }
